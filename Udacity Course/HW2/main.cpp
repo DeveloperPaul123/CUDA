@@ -30,6 +30,7 @@ void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsI
 /*******  Begin main *********/
 
 int main(int argc, char **argv) {
+  //allocate pointers. 
   uchar4 *h_inputImageRGBA,  *d_inputImageRGBA;
   uchar4 *h_outputImageRGBA, *d_outputImageRGBA;
   unsigned char *d_redBlurred, *d_greenBlurred, *d_blueBlurred;
