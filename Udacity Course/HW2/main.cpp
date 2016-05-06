@@ -34,6 +34,7 @@ int main(int argc, char **argv) {
   uchar4 *h_inputImageRGBA,  *d_inputImageRGBA;
   uchar4 *h_outputImageRGBA, *d_outputImageRGBA;
   unsigned char *d_redBlurred, *d_greenBlurred, *d_blueBlurred;
+  unsigned char *h_redBlurred, *h_greenBlurred, *h_blueBlurred;
 
   float *h_filter;
   int    filterWidth;
@@ -95,7 +96,6 @@ int main(int argc, char **argv) {
   }
 
   //check results and output the blurred image
-
   size_t numPixels = numRows()*numCols();
   //copy the output back to the host
   checkCudaErrors(cudaMemcpy(h_outputImageRGBA, d_outputImageRGBA__, sizeof(uchar4) * numPixels, cudaMemcpyDeviceToHost));

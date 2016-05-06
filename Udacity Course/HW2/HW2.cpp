@@ -67,7 +67,7 @@ void preProcess(uchar4 **h_inputImageRGBA, uchar4 **h_outputImageRGBA,
   d_outputImageRGBA__ = *d_outputImageRGBA;
 
   //now create the filter that they will use
-  const int blurKernelWidth = 9;
+  const int blurKernelWidth = 15;
   const float blurKernelSigma = 2.;
 
   *filterWidth = blurKernelWidth;
