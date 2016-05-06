@@ -228,7 +228,26 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
                         unsigned char *d_blueBlurred,
                         const int filterWidth)
 {
-  //TODO: Set reasonable block size (i.e., number of threads per block)
+	//get the fastest device. 
+	int num_devices, device;
+	cudaGetDeviceCount(&num_devices);
+	if (num_devices > 1) {
+		int max_multiprocessors = 0, max_device = 0;
+		for (device = 0; device < num_devices; device++) {
+			cudaDeviceProp properties;
+			cudaGetDeviceProperties(&properties, device);
+			if (max_multiprocessors < properties.multiProcessorCount) {
+				std::cout << "Device: " << properties.name << " Max Processors: " << properties.multiProcessorCount << std::endl;
+				max_multiprocessors = properties.multiProcessorCount;
+				max_device = device;
+			}
+		}
+		cudaDeviceProp prop;
+		cudaGetDeviceProperties(&prop, max_device);
+		std::cout << "Selecting device : " << max_device << " " << prop.name << " " << "Max Processors: " << prop.multiProcessorCount << std::endl;
+		cudaSetDevice(max_device);
+	}
+  //Set reasonable block size (i.e., number of threads per block)
 	const dim3 blockSize(numCols);
 
   //TODO:
