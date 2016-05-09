@@ -244,7 +244,7 @@ void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_
 		}
 		cudaDeviceProp prop;
 		cudaGetDeviceProperties(&prop, max_device);
-		std::cout << "Selecting device : " << max_device << " " << prop.name << " " << "Max Processors: " << prop.multiProcessorCount << std::endl;
+		std::cout << "Selecting device : " << max_device << " " << prop.name << " " << "Max Processors: " << prop.multiProcessorCount << " Clock: " << prop.clockRate << std::endl;
 		cudaSetDevice(max_device);
 	}
   //Set reasonable block size (i.e., number of threads per block)
