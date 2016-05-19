@@ -88,7 +88,20 @@
 #define __CUDACC__
 #endif
 
-__global__ void maxReduce(const float *d_logLuminance, float *d_max_out) {
+#define BLOCKSIZE 256
+
+unsigned int nextPow2(unsigned int x)
+{
+	--x;
+	x |= x >> 1;
+	x |= x >> 2;
+	x |= x >> 4;
+	x |= x >> 8;
+	x |= x >> 16;
+	return ++x;
+}
+
+__global__ void maxReduce(const float *d_logLuminance, float *d_max_out, int size) {
 	
 	//shared memory, size allocated in kernel call
 	extern __shared__ float s_data[];
@@ -97,14 +110,16 @@ __global__ void maxReduce(const float *d_logLuminance, float *d_max_out) {
 	int tid = threadIdx.x;
 	int mId = tid + (blockDim.x *blockIdx.x);
 	//store in shared memory.
-	s_data[tid] = d_logLuminance[tid];
+	s_data[tid] = (mId < size) ? d_logLuminance[mId] : -FLT_MAX;
+
+	//make sure shared memory is loaded. 
 	__syncthreads();
 
 	//sequential addressing and then performing reduction between two halfs of the block size. 
 	for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1){
 		//if thread index is < block dimension, then perform our operation.
 		if (tid < s) {
-			s_data[tid] = max(s_data[tid], s_data[tid + s]);
+			s_data[tid] = fmaxf(s_data[tid], s_data[tid + s]);
 		}
 		__syncthreads();
 	}
@@ -114,7 +129,7 @@ __global__ void maxReduce(const float *d_logLuminance, float *d_max_out) {
 	}
 }
 
-__global__ void minReduce(const float *d_logLuminance, float *d_min_out) {
+__global__ void minReduce(const float *d_logLuminance, float *d_min_out, int size) {
 
 	//shared memory, size allocated in kernel call
 	extern __shared__ float s_data[];
@@ -123,12 +138,15 @@ __global__ void minReduce(const float *d_logLuminance, float *d_min_out) {
 	int tid = threadIdx.x;
 	int mId = tid + (blockDim.x *blockIdx.x);
 	//store in shared memory.
-	s_data[tid] = d_logLuminance[tid];
+	s_data[tid] = (mId < size) ? d_logLuminance[mId] : FLT_MAX;
+
+	//make sure all the shared memory is loaded. 
 	__syncthreads();
 
 	for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1){
 		if (tid < s) {
-			s_data[tid] = min(s_data[tid], s_data[tid + s]);
+			float temp = s_data[tid];
+			s_data[tid] = fminf(temp, s_data[tid + s]);
 		}
 		__syncthreads();
 	}
@@ -138,13 +156,16 @@ __global__ void minReduce(const float *d_logLuminance, float *d_min_out) {
 	}
 }
 
-__global__ void histogram(const float* const d_logLuminance, const int* d_hist, const float min, const float max, const int numBins) {
+__global__ void histogram(const float* const d_logLuminance, int* d_hist, const float min, const float max, const int numBins, const int size) {
 	float range = max - min;
 	//compute the histgram
 	int id = threadIdx.x + blockDim.x*blockIdx.x;
-	float data = d_logLuminance[id];
-	int bin = ((data - min) / (range))* numBins;
-	atomicAdd(&(d_hist[bin]), 1);
+	if (id < size) {
+		float data = d_logLuminance[id];
+		int bin = ((data - min) / (range))* numBins;
+		atomicAdd(&d_hist[bin], 1);
+	}
+	
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -167,46 +188,61 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
 	the cumulative distribution of luminance values (this should go in the
 	incoming d_cdf pointer which already has been allocated for you)       */
 
+	int N = numCols * numRows;
+
 	//step 1, find min and max. 
 	const int maxThreadsPerBlock = 1024;
-	int threads = maxThreadsPerBlock;
-	int blocks = (numRows*numCols) / maxThreadsPerBlock;
+	int threads = (N < BLOCKSIZE) ? nextPow2(N) : BLOCKSIZE;
+	int blocks = (N + threads - 1) / threads;
 
 	float *d_min_out;
 	float *d_max_out;
-	float *d_min_int, *d_max_int;
-	checkCudaErrors(cudaMalloc((void**)&d_min_int, sizeof(float)*numCols*numRows));
-	checkCudaErrors(cudaMalloc((void**)&d_max_int, sizeof(float)*numCols*numRows));
-	checkCudaErrors(cudaMalloc((void**)&d_min_out, sizeof(float)));
-	checkCudaErrors(cudaMalloc((void**)&d_max_out, sizeof(float)));
+	checkCudaErrors(cudaMalloc((void**)&d_min_out, sizeof(float)*numCols*numRows));
+	checkCudaErrors(cudaMalloc((void**)&d_max_out, sizeof(float)*numCols*numRows));
 
 	//allocate shared memory.
-	size_t size = sizeof(float) * numRows * numCols; //shared memory size. 
+	int size = (threads <= 32) ? 2 * threads * sizeof(int) : threads * sizeof(int);
 
-	minReduce<<<blocks, threads, size>>>(d_logLuminance, d_min_int);
-	maxReduce<<< blocks, threads, size >> > (d_logLuminance, d_max_int);
+	minReduce << <blocks, threads, size >> >(d_logLuminance, d_min_out, N);
+	maxReduce << < blocks, threads, size >> > (d_logLuminance, d_max_out, N);
 
-	//reduce the last block
-	threads = blocks;
-	blocks = 1;
-	minReduce <<<blocks, threads, size >> >(d_min_int, d_min_out);
-	maxReduce <<<blocks, threads, size >> >(d_max_int, d_max_out);
-	//now have min and max. 
-	//copy result to output floats.
-	checkCudaErrors(cudaMemcpy(&min_logLum, d_min_out, sizeof(float), cudaMemcpyDeviceToHost));
-	checkCudaErrors(cudaMemcpy(&max_logLum, d_max_out, sizeof(float), cudaMemcpyDeviceToHost));
+	float *h_min_out = (float *)malloc(sizeof(float)*numRows*numCols);
+	float *h_max_out = (float *)malloc(sizeof(float)*numRows*numCols);
+
+	checkCudaErrors(cudaMemcpy(h_min_out, d_min_out, sizeof(float)*numCols*numRows, cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(h_max_out, d_max_out, sizeof(float)*numCols*numRows, cudaMemcpyDeviceToHost));
+
+	//perform final part of min and max on the CPU
+	float min = FLT_MAX;
+	float max = -FLT_MAX;
+	for (int i = 0; i < N; i++) {
+		min = fminf(h_min_out[i], min);
+		max = fmaxf(h_max_out[i], max);
+	}
+	//set min and max. 
+	min_logLum = min;
+	max_logLum = max;	
+	printf("Max: %f\n", min);
+	printf("Min: %f\n", max);
 
 	//now need to generate a histogram. 
 	int * h_hist = new int[numBins];
-
+	for (int i = 0; i < numBins; i++) {
+		h_hist[i] = 0;
+	}
 	//allocated device memory.
 	int *d_hist;
-	checkCudaErrors(cudaMalloc((void**)d_hist, sizeof(int) * numBins));
-	threads = maxThreadsPerBlock;
-	blocks = (numRows*numCols) / maxThreadsPerBlock;
+	checkCudaErrors(cudaMalloc(&d_hist, sizeof(int) * numBins));
+	checkCudaErrors(cudaMemcpy(d_hist, h_hist, sizeof(int)*numBins, cudaMemcpyHostToDevice));
 
 	//generate the histogram. 
-	histogram <<<blocks, threads >> >(d_logLuminance, d_hist, min_logLum, max_logLum, numBins);
-	checkCudaErrors(cudaMemcpy(h_hist, d_hist, sizeof(int) * numBins,cudaMemcpyDeviceToHost));
+	histogram <<<blocks, threads >> >(d_logLuminance, d_hist, min_logLum, max_logLum, numBins, N);
+	//copy results back. 
+	checkCudaErrors(cudaMemcpy(&h_hist, d_hist, sizeof(int) * numBins, cudaMemcpyDeviceToHost));
 
+	printf("Number of bins %d\n", numBins);
+
+	for (int x = 0; x < numBins; x++) {
+		std::cout << "Bin: " << x << " Value: " << h_hist[x] << std::endl;
+	}
 }
