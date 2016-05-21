@@ -90,6 +90,10 @@
 
 #define BLOCKSIZE 256
 
+#define NUM_BANKS 16  
+#define LOG_NUM_BANKS 4  
+#define CONFLICT_FREE_OFFSET(n) ((n) >> NUM_BANKS + (n) >> (2 * LOG_NUM_BANKS))
+
 unsigned int nextPow2(unsigned int x)
 {
 	--x;
@@ -156,16 +160,66 @@ __global__ void minReduce(const float *d_logLuminance, float *d_min_out, int siz
 	}
 }
 
-__global__ void histogram(const float* const d_logLuminance, int* d_hist, const float min, const float max, const int numBins, const int size) {
+__global__ void histogram(const float* const d_logLuminance, unsigned int* d_hist, const float min, const float max, const int numBins, const int size) {
 	float range = max - min;
 	//compute the histgram
 	int id = threadIdx.x + blockDim.x*blockIdx.x;
 	if (id < size) {
 		float data = d_logLuminance[id];
 		int bin = ((data - min) / (range))* numBins;
-		atomicAdd(&d_hist[bin], 1);
+		if (bin < numBins) {
+			atomicAdd(&d_hist[bin], 1);
+		}
 	}
 	
+}
+
+__global__ void exclusiveScan(unsigned int* const g_hist, unsigned int* o_data, int size) {
+	
+	extern __shared__ unsigned int temp[];// allocated on invocation
+	int thid = threadIdx.x;
+
+	int offset = 1;
+	int n = size;
+	int ai = thid;
+	int bi = thid + (n / 2);
+	int bankOffsetA = CONFLICT_FREE_OFFSET(ai);
+	int bankOffsetB = CONFLICT_FREE_OFFSET(ai);
+	temp[ai + bankOffsetA] = g_hist[ai];
+	temp[bi + bankOffsetB] = g_hist[bi];
+
+	for (int d = n >> 1; d > 0; d >>= 1) // build sum in place up the tree
+	{
+		__syncthreads();
+		if (thid < d)
+		{
+			int ai = offset*(2 * thid + 1) - 1;
+			int bi = offset*(2 * thid + 2) - 1;
+			ai += CONFLICT_FREE_OFFSET(ai);
+			bi += CONFLICT_FREE_OFFSET(bi);
+			temp[bi] += temp[ai];
+		}
+		offset *= 2;
+	}
+	if (thid == 0) { temp[n-1 + CONFLICT_FREE_OFFSET(n - 1)] = 0; }
+	for (int d = 1; d < n; d *= 2) // traverse down tree & build scan
+	{
+		offset >>= 1;
+		__syncthreads();
+		if (thid < d)
+		{
+			int ai = offset*(2 * thid + 1) - 1;
+			int bi = offset*(2 * thid + 2) - 1;
+			ai += CONFLICT_FREE_OFFSET(ai);
+			bi += CONFLICT_FREE_OFFSET(bi);
+			unsigned int t = temp[ai];
+			temp[ai] = temp[bi];
+			temp[bi] += t;
+		}
+	}
+	__syncthreads();
+	o_data[ai] = temp[ai + bankOffsetA];
+	o_data[bi] = temp[bi + bankOffsetB];
 }
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
@@ -176,8 +230,6 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-
-	//TODO
 	/*Here are the steps you need to implement
 	1) find the minimum and maximum value in the input logLuminance channel
 	store in min_logLum and max_logLum
@@ -222,27 +274,21 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
 	//set min and max. 
 	min_logLum = min;
 	max_logLum = max;	
-	printf("Max: %f\n", min);
-	printf("Min: %f\n", max);
 
 	//now need to generate a histogram. 
-	int * h_hist = new int[numBins];
-	for (int i = 0; i < numBins; i++) {
-		h_hist[i] = 0;
-	}
+	unsigned int * h_hist = (unsigned int*)malloc(sizeof(unsigned int)*numBins);
+	memset(h_hist, 0, sizeof(unsigned int) * numBins);
 	//allocated device memory.
-	int *d_hist;
-	checkCudaErrors(cudaMalloc(&d_hist, sizeof(int) * numBins));
-	checkCudaErrors(cudaMemcpy(d_hist, h_hist, sizeof(int)*numBins, cudaMemcpyHostToDevice));
+	unsigned int *d_hist;
+	checkCudaErrors(cudaMalloc((void**)&d_hist, sizeof(unsigned int) * numBins));
+	checkCudaErrors(cudaMemcpy(d_hist, h_hist, sizeof(unsigned int)*numBins, cudaMemcpyHostToDevice));
 
 	//generate the histogram. 
-	histogram <<<blocks, threads >> >(d_logLuminance, d_hist, min_logLum, max_logLum, numBins, N);
+	histogram <<<blocks, threads >>>(d_logLuminance, d_hist, min_logLum, max_logLum, numBins, N);
 	//copy results back. 
-	checkCudaErrors(cudaMemcpy(&h_hist, d_hist, sizeof(int) * numBins, cudaMemcpyDeviceToHost));
+	checkCudaErrors(cudaMemcpy(h_hist, d_hist, sizeof(unsigned int) * numBins, cudaMemcpyDeviceToHost));
 
-	printf("Number of bins %d\n", numBins);
-
-	for (int x = 0; x < numBins; x++) {
-		std::cout << "Bin: " << x << " Value: " << h_hist[x] << std::endl;
-	}
+	//allocate shared memory. 
+	size_t shMemSize = 2 * numBins *sizeof(unsigned int);
+	exclusiveScan <<<1, numBins, shMemSize >> >(d_hist, d_cdf, numBins);
 }
